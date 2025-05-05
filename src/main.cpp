@@ -19,7 +19,7 @@ DHT dht(DHTPIN, DHTTYPE);
 
 // ---------- LED MA TRẬN MAX7219 ----------
 #define HARDWARE_TYPE MD_MAX72XX::FC16_HW
-#define MAX_DEVICES   5  // số module
+#define MAX_DEVICES   6  // số module
 #define DATA_PIN      23
 #define CLK_PIN       18
 #define CS_PIN        5
