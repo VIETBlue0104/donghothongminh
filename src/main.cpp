@@ -1,160 +1,201 @@
+// ---------- Includes ----------
 #include <WiFi.h>
 #include <DHT.h>
 #include <MD_Parola.h>
-#include <MD_MAX72XX.h>
+#include <MD_MAX72xx.h>
 #include <SPI.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 #include <Wire.h>
 #include <RTClib.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include "Font7Seg.h"
 
-// ---------- CẤU HÌNH WI-FI ----------
+// ---------- WiFi ----------
 const char* ssid     = "P 302";
 const char* password = "0327287976";
 
-// ---------- CẢM BIẾN DHT22 ----------
+// ---------- DHT ----------
 #define DHTPIN   4
 #define DHTTYPE  DHT22
 DHT dht(DHTPIN, DHTTYPE);
 
-// ---------- LED MA TRẬN MAX7219 ----------
+// ---------- Matrix ----------
 #define HARDWARE_TYPE MD_MAX72XX::FC16_HW
-#define MAX_DEVICES   6  // số module
+#define MAX_DEVICES   6
 #define DATA_PIN      23
 #define CLK_PIN       18
 #define CS_PIN        5
 MD_Parola ledMatrix(HARDWARE_TYPE, DATA_PIN, CLK_PIN, CS_PIN, MAX_DEVICES);
 
-// ---------- NTP CLIENT ----------
+// ---------- NTP + RTC ----------
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org", 7 * 3600, 60 * 60 * 1000);
-
-// ---------- RTC DS1307 ----------
 RTC_DS1307 rtc;
 
-// ----- Thời gian hiển thị -----
-const unsigned long TIME_PHASE = 20000;  // 20 giây hiển thị đồng hồ
-const unsigned long TEMP_PHASE = 5000;   // 5 giây hiển thị nhiệt độ/độ ẩm
-const uint8_t SCROLL_SPEED = 50;
+// ---------- Light Sensor ----------
+#define LIGHT_SENSOR_PIN 34
 
-enum Phase { SHOW_TIME, SHOW_TEMP };
-Phase lastPhase = SHOW_TEMP;
+// ---------- Globals ----------
+char szTime[9];      // HH:MM:SS
+char szMesg[64];
+float humidity = 0, temperature = 0;
+uint32_t timerDHT = 0;
+const uint32_t DHT_INTERVAL = 5000;  // update every 5s
+uint8_t degC[] = {8, 3, 3,0, 62, 65, 65, 65, 34};
 
-// Forward declarations
-void setSplitZone();
-void setSingleZone();
-void showTime();
-void showTemp();
+enum DisplayMode { SHOW_TIME, SHOW_TEMP_HUMID, SHOW_DATE };
+DisplayMode mode = SHOW_TIME;
+
+// ---------- Function Prototypes ----------
+void adjustBrightness();
+void updateTemperature();
+void updateTimeString();
+String getLunarDate(int d, int m, int y);
+DateTime getCurrentTime();
 
 void setup() {
   Serial.begin(115200);
-  dht.begin();
   Wire.begin();
+  dht.begin();
+  pinMode(LIGHT_SENSOR_PIN, INPUT);
 
-  // Khởi tạo RTC
+  // RTC init
   if (!rtc.begin()) {
-    Serial.println("RTC DS1307 not found!");
+    Serial.println("RTC not found!");
   } else if (!rtc.isrunning()) {
-    Serial.println("RTC lost power. Setting to compile time.");
     rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
   }
 
-  // Khởi tạo LED ma trận
+  // Matrix init
   ledMatrix.begin();
-  ledMatrix.setIntensity(3);
-  setSplitZone();
-  ledMatrix.displayClear();
-  ledMatrix.displaySuspend(false);
-  ledMatrix.displayReset();
+  ledMatrix.setIntensity(5);
+  ledMatrix.setZone(0, 0, MAX_DEVICES - 1);
+  ledMatrix.setFont(0, nullptr);
+  ledMatrix.addChar('$', degC);
 
-  // Kết nối Wi-Fi và NTP
-  Serial.print("Connecting WiFi");
+  // WiFi + NTP
   WiFi.begin(ssid, password);
-  unsigned long t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 10000) {
-    delay(500);
-    Serial.print(".");
+  uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
+    delay(200);
   }
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println(" OK");
     timeClient.begin();
     timeClient.update();
     rtc.adjust(DateTime((uint32_t)timeClient.getEpochTime()));
-  } else {
-    Serial.println(" FAIL (offline mode)");
   }
 }
 
 void loop() {
-  unsigned long now = millis();
-  Phase phase = ((now % (TIME_PHASE + TEMP_PHASE)) < TIME_PHASE) ? SHOW_TIME : SHOW_TEMP;
-
-  if (phase != lastPhase) {
-    if (phase == SHOW_TIME) showTime();
-    else showTemp();
-    lastPhase = phase;
-  }
-}
-
-void setSplitZone() {
-  for (uint8_t z = 0; z < MAX_DEVICES; z++) {
-    ledMatrix.setZone(z, z, z);
-  }
-}
-
-void setSingleZone() {
-  ledMatrix.setZone(0, 0, MAX_DEVICES - 1);
-}
-
-// Hiển thị và cập nhật giây liên tục trong TIME_PHASE
-void showTime() {
-  unsigned long start = millis();
-  int lastSecond = -1;
-
-  // Chuẩn bị hiển thị
-  setSingleZone();
-  ledMatrix.displayClear();
-  ledMatrix.displayReset();
-
-  while (millis() - start < TIME_PHASE) {
-    uint32_t epoch = (WiFi.status() == WL_CONNECTED)
-                     ? (timeClient.update(), timeClient.getEpochTime())
-                     : rtc.now().unixtime();
-    int h = (epoch / 3600) % 24;
-    int m = (epoch / 60) % 60;
-    int s = epoch % 60;
-
-    if (s != lastSecond) {
-      char buf[9];
-      snprintf(buf, sizeof(buf), "%02d:%02d:%02d", h, m, s);
-      ledMatrix.displayText(buf, PA_CENTER, 0, 0, PA_NO_EFFECT, PA_NO_EFFECT);
-      lastSecond = s;
+  switch (mode) {
+    case SHOW_TIME: {
+      ledMatrix.setFont(0, numeric7Seg);
+      uint32_t tStart = millis();
+      while (millis() - tStart < 30000) {
+        adjustBrightness();
+        updateTimeString();
+        ledMatrix.displayClear();
+        ledMatrix.setTextEffect(0, PA_PRINT, PA_NO_EFFECT);
+        ledMatrix.displayText(szTime, PA_CENTER, 0, 0, PA_PRINT, PA_NO_EFFECT);
+        ledMatrix.displayAnimate();
+        delay(1000);
+      }
+      mode = SHOW_TEMP_HUMID;
+      break;
     }
-    ledMatrix.displayAnimate();
-  }
 
-  // Khôi phục split zones
-  setSplitZone();
-  ledMatrix.displayReset();
+    case SHOW_TEMP_HUMID: {
+      updateTemperature();
+      if (isnan(temperature) || isnan(humidity)) strcpy(szMesg, "ERR");
+      else snprintf(szMesg, sizeof(szMesg), "%2.0f$ %2.0f%%", temperature, humidity);
+      ledMatrix.setFont(0, nullptr);
+      ledMatrix.displayClear();
+      ledMatrix.setTextEffect(0, PA_PRINT, PA_NO_EFFECT);
+      ledMatrix.displayText(szMesg, PA_CENTER, 0, 0, PA_PRINT, PA_NO_EFFECT);
+      uint32_t t0 = millis();
+      while (millis() - t0 < 5000) {
+        adjustBrightness();
+        ledMatrix.displayAnimate();
+        delay(100);
+      }
+      mode = SHOW_DATE;
+      break;
+    }
+
+    case SHOW_DATE: {
+      DateTime now = getCurrentTime();
+      const char* daysOfWeek[] = {"CN,", "T2,", "T3,", "T4,", "T5,", "T6,", "T7,"};
+      char solar[32];
+      snprintf(solar, sizeof(solar), "%s %02d-%02d-%04d", daysOfWeek[now.dayOfTheWeek()], now.day(), now.month(), now.year());
+      String lunar = getLunarDate(now.day(), now.month(), now.year());
+      char lunarBuf[32];
+      lunar.toCharArray(lunarBuf, sizeof(lunarBuf));
+      snprintf(szMesg, sizeof(szMesg), "%s     %s", solar, lunarBuf);
+      ledMatrix.setFont(0, nullptr);
+      ledMatrix.displayClear();
+      ledMatrix.setTextEffect(0, PA_SCROLL_LEFT, PA_SCROLL_LEFT);
+      ledMatrix.displayText(szMesg, PA_RIGHT, 25, 0, PA_SCROLL_LEFT, PA_SCROLL_LEFT);
+      while (!ledMatrix.getZoneStatus(0)) {
+        adjustBrightness();
+        ledMatrix.displayAnimate();
+      }
+      mode = SHOW_TIME;
+      break;
+    }
+  }
 }
 
-// Hiển thị nhiệt độ & độ ẩm scroll toàn màn
-void showTemp() {
-  float t = dht.readTemperature();
-  float h = dht.readHumidity();
-  char buf[16];
-  if (isnan(t) || isnan(h)) {
-    snprintf(buf, sizeof(buf), "Error DHT");
-  } else {
-    snprintf(buf, sizeof(buf), "T:%dC H:%d%%", (int)t, (int)h);
+void adjustBrightness() {
+  int light = analogRead(LIGHT_SENSOR_PIN);
+  int b = map(light, 0, 4095, 15, 0);
+  ledMatrix.setIntensity(constrain(b, 0, 15));
+}
+
+void updateTemperature() {
+  if (millis() - timerDHT > DHT_INTERVAL) {
+    timerDHT = millis();
+    temperature = dht.readTemperature();
+    humidity    = dht.readHumidity();
   }
+}
 
-  setSingleZone();
-  ledMatrix.displayClear();
-  ledMatrix.displayText(buf, PA_LEFT, SCROLL_SPEED, 0, PA_SCROLL_LEFT, PA_SCROLL_LEFT);
-  ledMatrix.displayReset();
-  while (!ledMatrix.displayAnimate());
+void updateTimeString() {
+  DateTime now = getCurrentTime();
+  snprintf(szTime, sizeof(szTime), "%02d:%02d:%02d", now.hour(), now.minute(), now.second());
+}
 
-  setSplitZone();
-  ledMatrix.displayReset();
+DateTime getCurrentTime() {
+  if (WiFi.status() == WL_CONNECTED) {
+    timeClient.update();
+    return DateTime((uint32_t)timeClient.getEpochTime());
+  } else {
+    return rtc.now();
+  }
+}
+
+String getLunarDate(int d, int m, int y) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    String url = "https://namtay.vn/api/convert-solar2lunar?dd=" + String(d) + "&mm=" + String(m) + "&yyyy=" + String(y);
+    http.begin(url);
+    int httpCode = http.GET();
+    if (httpCode == 200) {
+      String payload = http.getString();
+      DynamicJsonDocument doc(1024);
+      DeserializationError error = deserializeJson(doc, payload);
+      if (!error) {
+        int lunarDay = doc["lunar_day"];
+        int lunarMonth = doc["lunar_month"];
+        int lunarYear = doc["lunar_year"];
+        bool isLeap = doc["lunar_leap"];
+        String result = "AL, " + String(lunarDay) + "/" + String(lunarMonth);
+        if (isLeap) result += "N";
+        return result;
+      }
+    }
+    http.end();
+  }
+  return "AL, --/--";
 }
