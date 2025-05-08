@@ -1,4 +1,3 @@
-// ---------- Includes ----------
 #include <WiFi.h>
 #include <DHT.h>
 #include <MD_Parola.h>
@@ -8,10 +7,8 @@
 #include <WiFiUdp.h>
 #include <Wire.h>
 #include <RTClib.h>
-#include <HTTPClient.h>
-#include <ArduinoJson.h>
 #include "Font7Seg.h"
-
+#include "lunar_converter.h"
 // ---------- WiFi ----------
 const char* ssid     = "P 302";
 const char* password = "0327287976";
@@ -54,28 +51,27 @@ void updateTemperature();
 void updateTimeString();
 String getLunarDate(int d, int m, int y);
 DateTime getCurrentTime();
+void convertSolar2Lunar(int dd, int mm, int yy, int &ld, int &lm, int &ly, bool &leap);
 
+// ---------- Setup ----------
 void setup() {
   Serial.begin(115200);
   Wire.begin();
   dht.begin();
   pinMode(LIGHT_SENSOR_PIN, INPUT);
 
-  // RTC init
   if (!rtc.begin()) {
     Serial.println("RTC not found!");
   } else if (!rtc.isrunning()) {
     rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
   }
 
-  // Matrix init
   ledMatrix.begin();
   ledMatrix.setIntensity(5);
   ledMatrix.setZone(0, 0, MAX_DEVICES - 1);
   ledMatrix.setFont(0, nullptr);
   ledMatrix.addChar('$', degC);
 
-  // WiFi + NTP
   WiFi.begin(ssid, password);
   uint32_t start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
@@ -88,6 +84,7 @@ void setup() {
   }
 }
 
+// ---------- Loop ----------
 void loop() {
   switch (mode) {
     case SHOW_TIME: {
@@ -129,29 +126,49 @@ void loop() {
       const char* daysOfWeek[] = {"CN,", "T2,", "T3,", "T4,", "T5,", "T6,", "T7,"};
       char solar[32];
       snprintf(solar, sizeof(solar), "%s %02d-%02d-%04d", daysOfWeek[now.dayOfTheWeek()], now.day(), now.month(), now.year());
+      
+      // Lấy thông tin âm lịch với ngày, tháng, năm dương lịch
       String lunar = getLunarDate(now.day(), now.month(), now.year());
       char lunarBuf[32];
       lunar.toCharArray(lunarBuf, sizeof(lunarBuf));
+      
+      // Hiển thị ngày dương lịch và âm lịch
       snprintf(szMesg, sizeof(szMesg), "%s     %s", solar, lunarBuf);
       ledMatrix.setFont(0, nullptr);
       ledMatrix.displayClear();
       ledMatrix.setTextEffect(0, PA_SCROLL_LEFT, PA_SCROLL_LEFT);
       ledMatrix.displayText(szMesg, PA_RIGHT, 25, 0, PA_SCROLL_LEFT, PA_SCROLL_LEFT);
+      
       while (!ledMatrix.getZoneStatus(0)) {
         adjustBrightness();
         ledMatrix.displayAnimate();
       }
       mode = SHOW_TIME;
       break;
-    }
+    }    
   }
 }
 
 void adjustBrightness() {
-  int light = analogRead(LIGHT_SENSOR_PIN);
-  int b = map(light, 0, 4095, 15, 0);
-  ledMatrix.setIntensity(constrain(b, 0, 15));
+  int light = analogRead(LIGHT_SENSOR_PIN);  // Giá trị từ 0 đến 4095
+  
+  int brightnessLevel;
+
+  if (light < 500) {
+    brightnessLevel = 15;  // Rất tối
+  } else if (light < 1500) {
+    brightnessLevel = 10;  // Tối vừa
+  } else if (light < 2500) {
+    brightnessLevel = 7;   // Ánh sáng trung bình
+  } else if (light < 3500) {
+    brightnessLevel = 4;   // Khá sáng
+  } else {
+    brightnessLevel = 1;   // Rất sáng
+  }
+
+  ledMatrix.setIntensity(brightnessLevel);
 }
+
 
 void updateTemperature() {
   if (millis() - timerDHT > DHT_INTERVAL) {
@@ -175,27 +192,17 @@ DateTime getCurrentTime() {
   }
 }
 
+// ---------- Lunar Date ----------
 String getLunarDate(int d, int m, int y) {
-  if (WiFi.status() == WL_CONNECTED) {
-    HTTPClient http;
-    String url = "https://namtay.vn/api/convert-solar2lunar?dd=" + String(d) + "&mm=" + String(m) + "&yyyy=" + String(y);
-    http.begin(url);
-    int httpCode = http.GET();
-    if (httpCode == 200) {
-      String payload = http.getString();
-      DynamicJsonDocument doc(1024);
-      DeserializationError error = deserializeJson(doc, payload);
-      if (!error) {
-        int lunarDay = doc["lunar_day"];
-        int lunarMonth = doc["lunar_month"];
-        int lunarYear = doc["lunar_year"];
-        bool isLeap = doc["lunar_leap"];
-        String result = "AL, " + String(lunarDay) + "/" + String(lunarMonth);
-        if (isLeap) result += "N";
-        return result;
-      }
-    }
-    http.end();
-  }
-  return "AL, --/--";
+  int ld, lm, ly;
+  bool isLeap;
+  
+  // Chuyển đổi dương lịch sang âm lịch
+  convertSolar2Lunar(d, m, y, ld, lm, ly, isLeap);
+  
+  // Chuẩn bị chuỗi kết quả cho ngày tháng năm âm lịch
+  String result = "AL, " + String(ld) + "/" + String(lm) + "/" + String(ly);  // Thêm năm âm lịch
+  if (isLeap) result += "N";  // Nếu là tháng nhuận, thêm chữ "N"
+  
+  return result;
 }
