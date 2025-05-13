@@ -9,6 +9,21 @@
 #include <RTClib.h>
 #include "Font7Seg.h"
 #include "lunar_converter.h"
+#include <FastLED.h>  // Thêm thư viện FastLED
+
+// ---------- Cấu hình LED WS2812 ----------
+#define LED_PIN_1     15  // Chân kết nối thanh LED thứ nhất
+#define LED_PIN_2     16  // Chân kết nối thanh LED thứ hai
+#define NUM_LEDS      8   // Số LED mỗi thanh
+#define LED_BRIGHTNESS 30 // Độ sáng trung bình (0-255)
+
+CRGB leds1[NUM_LEDS];
+CRGB leds2[NUM_LEDS];
+
+// Biến để quản lý hiệu ứng chuyển màu
+uint8_t gHue = 0;  // Biến màu sắc
+bool ledsActive = false;  // Trạng thái LED có đang hoạt động không
+
 // ---------- WiFi ----------
 const char* ssid     = "P 302";
 const char* password = "0327287976";
@@ -18,8 +33,8 @@ unsigned long lastWelcomeTime = 0;
 const unsigned long WELCOME_INTERVAL = 5UL * 60 * 1000;  // 5 phút = 300000 ms
 
 // ---------- DHT ----------
-#define DHTPIN   4
-#define DHTTYPE  DHT22
+#define DHTPIN    4
+#define DHTTYPE   DHT22
 DHT dht(DHTPIN, DHTTYPE);
 
 // ---------- Matrix ----------
@@ -41,6 +56,8 @@ RTC_DS1307 rtc;
 // ---------- Globals ----------
 char szTime[9];      // HH:MM:SS
 char szMesg[64];
+unsigned long lastLEDUpdate = 0;
+const uint32_t LED_UPDATE_INTERVAL = 30;  // 30ms ~ 33fps
 const uint8_t heartBitmapPart1[] = {
   8, // <- Chiều rộng của ký tự
   0b00000000,
@@ -63,7 +80,7 @@ const uint8_t heartBitmapPart2[] = {
   0b00001000,
   0b00000000
 };
-                                                                                                                                                                                                                      
+
 float humidity = 0, temperature = 0;
 uint32_t timerDHT = 0;
 const uint32_t DHT_INTERVAL = 5000;  // update every 5s
@@ -78,6 +95,8 @@ void updateTimeString();
 String getLunarDate(int d, int m, int y);
 DateTime getCurrentTime();
 void convertSolar2Lunar(int dd, int mm, int yy, int &ld, int &lm, int &ly, bool &leap);
+void updateLEDs();  // Hàm cập nhật hiệu ứng LED
+void turnOffLEDs(); // Hàm tắt LED
 
 // ---------- Setup ----------
 void setup() {
@@ -85,6 +104,12 @@ void setup() {
   Wire.begin();
   dht.begin();
   pinMode(LIGHT_SENSOR_PIN, INPUT);
+
+  // Khởi tạo LED WS2812
+  FastLED.addLeds<WS2812, LED_PIN_1, GRB>(leds1, NUM_LEDS);
+  FastLED.addLeds<WS2812, LED_PIN_2, GRB>(leds2, NUM_LEDS);
+  FastLED.setBrightness(LED_BRIGHTNESS);
+  turnOffLEDs();  // Tắt LED ban đầu
 
   if (!rtc.begin()) {
     Serial.println("RTC not found!");
@@ -97,9 +122,9 @@ void setup() {
   ledMatrix.setZone(0, 0, MAX_DEVICES - 1);
   ledMatrix.setFont(0, nullptr);
   ledMatrix.addChar('$', degC);
-  // Gán heartBitmapPart1 cho kí tự '$' và heartBitmapPart2 cho kí tự '%'
-  ledMatrix.addChar('<', heartBitmapPart1);  // Ký tự '$' cho phần 1 của trái tim
-  ledMatrix.addChar('>', heartBitmapPart2);  // Ký tự '%' cho phần 2 của trái tim
+  ledMatrix.addChar('<', heartBitmapPart1);
+  ledMatrix.addChar('>', heartBitmapPart2);
+  
   WiFi.begin(ssid, password);
   uint32_t start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
@@ -114,10 +139,17 @@ void setup() {
 
 // ---------- Loop ----------
 void loop() {
+  // Cập nhật hiệu ứng LED nếu đang hoạt động
+  if (ledsActive && millis() - lastLEDUpdate >= LED_UPDATE_INTERVAL) {
+  lastLEDUpdate = millis();
+  updateLEDs();
+}
+
   // --- Ưu tiên hiển thị "GIANG <> NIEN" mỗi phút ---
   if (millis() - lastWelcomeTime > 190000) {
     lastWelcomeTime = millis();
     mode = SCROLL_TEXT;
+    ledsActive = true;  // Bật LED khi chuyển mode
   }
 
   // --- Đồng bộ thời gian từ NTP mỗi 2 tiếng ---
@@ -130,23 +162,23 @@ void loop() {
 
   // --- Điều khiển các chế độ hiển thị ---
   switch (mode) {
-
     case SCROLL_TEXT: {
       ledMatrix.setFont(0, nullptr);
       ledMatrix.displayClear();
-    
-      ledMatrix.setCharSpacing(0);  // Không khoảng cách cho trái tim
+      ledMatrix.setCharSpacing(0);
       const char* welcomeMsg = "G I A N G <> N I E N";
       ledMatrix.setTextEffect(0, PA_SCROLL_RIGHT, PA_SCROLL_RIGHT);
       ledMatrix.displayText(welcomeMsg, PA_LEFT, 68, 0, PA_SCROLL_RIGHT, PA_SCROLL_RIGHT);
-    
+
       while (!ledMatrix.getZoneStatus(0)) {
         adjustBrightness();
         ledMatrix.displayAnimate();
+        updateLEDs();  // Thêm dòng này
       }
 
-      ledMatrix.setCharSpacing(1);  // Trả lại bình thường sau trái tim
+      ledMatrix.setCharSpacing(1);
       mode = SHOW_TIME;
+      ledsActive = true;
       break;
     }
 
@@ -160,9 +192,11 @@ void loop() {
         ledMatrix.setTextEffect(0, PA_PRINT, PA_NO_EFFECT);
         ledMatrix.displayText(szTime, PA_CENTER, 0, 0, PA_PRINT, PA_NO_EFFECT);
         ledMatrix.displayAnimate();
+        updateLEDs();  // Thêm dòng này
         delay(1000);
       }
       mode = SHOW_TEMP_HUMID;
+      ledsActive = true;
       break;
     }
 
@@ -180,9 +214,11 @@ void loop() {
       while (millis() - t0 < 3000) {
         adjustBrightness();
         ledMatrix.displayAnimate();
+        updateLEDs();  // Thêm dòng này
         delay(100);
       }
       mode = SHOW_DATE;
+      ledsActive = true;
       break;
     }
 
@@ -205,8 +241,10 @@ void loop() {
       while (!ledMatrix.getZoneStatus(0)) {
         adjustBrightness();
         ledMatrix.displayAnimate();
+        updateLEDs();  // Thêm dòng này
       }
       mode = SHOW_TIME;
+      ledsActive = true;
       break;
     }
   }
@@ -224,12 +262,11 @@ void adjustBrightness() {
   } else if (light < 3000) {
     brightnessLevel = 4;   // Trung bình
   } else {
-    brightnessLevel = 1;  // Ngoài trời sáng mạnh
+    brightnessLevel = 2;  // Ngoài trời sáng mạnh
   }
 
   ledMatrix.setIntensity(brightnessLevel);
 }
-
 
 void updateTemperature() {
   if (millis() - timerDHT > DHT_INTERVAL) {
@@ -251,6 +288,26 @@ DateTime getCurrentTime() {
   } else {
     return rtc.now();
   }
+}
+
+// ---------- Hàm điều khiển LED WS2812 ----------
+void updateLEDs() {
+  // Hiệu ứng chuyển màu rainbow
+  fill_rainbow(leds1, NUM_LEDS, gHue, 7);
+  fill_rainbow(leds2, NUM_LEDS, gHue, 7);
+  
+  FastLED.show();
+  FastLED.delay(30);  // Làm mượt hiệu ứng
+  
+  gHue++;  // Thay đổi màu sắc
+}
+
+void turnOffLEDs() {
+  // Tắt tất cả LED
+  fill_solid(leds1, NUM_LEDS, CRGB::Black);
+  fill_solid(leds2, NUM_LEDS, CRGB::Black);
+  FastLED.show();
+  ledsActive = false;
 }
 
 // ---------- Lunar Date ----------
