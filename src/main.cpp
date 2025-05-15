@@ -12,13 +12,13 @@
 #include <FastLED.h>  // Thêm thư viện FastLED
 
 // ---------- Cấu hình LED WS2812 ----------
-#define LED_PIN_1     15  // Chân kết nối thanh LED thứ nhất
-#define LED_PIN_2     16  // Chân kết nối thanh LED thứ hai
-#define NUM_LEDS      8   // Số LED mỗi thanh
-#define LED_BRIGHTNESS 30 // Độ sáng trung bình (0-255)
+#define LED_PIN  15  // Chân kết nối thanh LED thứ nhất
+#define NUM_LEDS 24   // Số LED mỗi thanh
+#define LED_BRIGHTNESS 25 // Độ sáng trung bình (0-255)
 
-CRGB leds1[NUM_LEDS];
-CRGB leds2[NUM_LEDS];
+CRGB leds[NUM_LEDS];
+
+#define LED_ALWAYS_ON_PIN 2
 
 // Biến để quản lý hiệu ứng chuyển màu
 uint8_t gHue = 0;  // Biến màu sắc
@@ -105,17 +105,23 @@ void setup() {
   dht.begin();
   pinMode(LIGHT_SENSOR_PIN, INPUT);
 
+   // Cấu hình LED luôn sáng với PWM
+  ledcAttachPin(LED_ALWAYS_ON_PIN, 0);   // Kênh 0
+  ledcSetup(0, 5000, 8);  // PWM tần số 5kHz, độ phân giải 8 bit (0 - 255)
+  ledcWrite(0, 245);  // Độ sáng trung bình (0-255). Thử 80, có thể chỉnh cao/thấp tùy ý
   // Khởi tạo LED WS2812
-  FastLED.addLeds<WS2812, LED_PIN_1, GRB>(leds1, NUM_LEDS);
-  FastLED.addLeds<WS2812, LED_PIN_2, GRB>(leds2, NUM_LEDS);
+  FastLED.addLeds<WS2812, LED_PIN, GRB>(leds, NUM_LEDS);
   FastLED.setBrightness(LED_BRIGHTNESS);
   turnOffLEDs();  // Tắt LED ban đầu
 
   if (!rtc.begin()) {
-    Serial.println("RTC not found!");
-  } else if (!rtc.isrunning()) {
-    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-  }
+  Serial.println("❌ Không tìm thấy RTC (có thể dây kết nối I2C sai hoặc chưa cắm).");
+} else if (!rtc.isrunning()) {
+  Serial.println("⚠️ RTC không chạy! Đang khởi tạo lại với thời gian biên dịch.");
+  rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+} else {
+  Serial.println("✅ RTC DS1307 đang hoạt động.");
+}
 
   ledMatrix.begin();
   ledMatrix.setIntensity(5);
@@ -252,22 +258,15 @@ void loop() {
 
 
 void adjustBrightness() {
-  int light = analogRead(LIGHT_SENSOR_PIN);  // 0 - 4095
+  int lightSensorValue = digitalRead(LIGHT_SENSOR_PIN); 
   int brightnessLevel;
-
-  if (light < 1000) {
-    brightnessLevel = 14;   // Rất tối → cực dịu ban đêm
-  } else if (light < 2000) {
-    brightnessLevel = 7;   // Tối vừa
-  } else if (light < 3000) {
-    brightnessLevel = 4;   // Trung bình
-  } else {
-    brightnessLevel = 2;  // Ngoài trời sáng mạnh
+  if (lightSensorValue == HIGH) {
+    brightnessLevel = 1;
+  } else {  
+    brightnessLevel = 14;
   }
-
   ledMatrix.setIntensity(brightnessLevel);
 }
-
 void updateTemperature() {
   if (millis() - timerDHT > DHT_INTERVAL) {
     timerDHT = millis();
@@ -293,9 +292,7 @@ DateTime getCurrentTime() {
 // ---------- Hàm điều khiển LED WS2812 ----------
 void updateLEDs() {
   // Hiệu ứng chuyển màu rainbow
-  fill_rainbow(leds1, NUM_LEDS, gHue, 7);
-  fill_rainbow(leds2, NUM_LEDS, gHue, 7);
-  
+  fill_rainbow(leds, NUM_LEDS, gHue, 7);
   FastLED.show();
   FastLED.delay(30);  // Làm mượt hiệu ứng
   
@@ -304,8 +301,7 @@ void updateLEDs() {
 
 void turnOffLEDs() {
   // Tắt tất cả LED
-  fill_solid(leds1, NUM_LEDS, CRGB::Black);
-  fill_solid(leds2, NUM_LEDS, CRGB::Black);
+  fill_solid(leds, NUM_LEDS, CRGB::Black);
   FastLED.show();
   ledsActive = false;
 }
