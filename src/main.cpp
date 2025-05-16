@@ -10,6 +10,22 @@
 #include "Font7Seg.h"
 #include "lunar_converter.h"
 #include <FastLED.h>
+#include <SPIFFS.h>
+#include <AudioFileSourceSPIFFS.h>
+#include <AudioGeneratorWAV.h>
+#include <AudioOutputI2S.h>
+
+#define I2S_BCLK 25
+#define I2S_LRC 26
+#define I2S_DOUT 13
+
+const char* wavFile = "/baothu.wav";
+
+AudioGeneratorWAV *wav = nullptr;
+AudioFileSourceSPIFFS *file = nullptr;
+AudioOutputI2S *out = nullptr;
+
+bool hasPlayedAlarm = false;
 
 // ---------- Cấu hình LED WS2812 ----------
 #define LED_PIN         15
@@ -54,7 +70,7 @@ RTC_DS1307 rtc;
 #define NUM_SAMPLES 10  // Số mẫu để lấy trung bình
 int lightSensorValues[NUM_SAMPLES];
 int sampleIndex = 0;
-
+int alarmPlayCount = 0;
 // ---------- Globals ----------
 char szTime[9];
 char szMesg[64];
@@ -99,7 +115,7 @@ DateTime getCurrentTime();
 void convertSolar2Lunar(int dd, int mm, int yy, int &ld, int &lm, int &ly, bool &leap);
 void updateLEDs();
 void turnOffLEDs();
-
+void playAlarmSound();
 // ---------- Setup ----------
 void setup() {
   Serial.begin(115200);
@@ -121,12 +137,9 @@ void setup() {
   turnOffLEDs();
 
   if (!rtc.begin()) {
-    Serial.println("❌ Không tìm thấy RTC (có thể dây kết nối I2C sai hoặc chưa cắm).");
   } else if (!rtc.isrunning()) {
-    Serial.println("⚠️ RTC không chạy! Đang khởi tạo lại với thời gian biên dịch.");
     rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
   } else {
-    Serial.println("✅ RTC DS1307 đang hoạt động.");
   }
 
   ledMatrix.begin();
@@ -136,6 +149,9 @@ void setup() {
   ledMatrix.addChar('$', degC);
   ledMatrix.addChar('<', heartBitmapPart1);
   ledMatrix.addChar('>', heartBitmapPart2);
+  if (!SPIFFS.begin(true)) {
+} else {
+}
 
   WiFi.begin(ssid, password);
   uint32_t start = millis();
@@ -151,6 +167,29 @@ void setup() {
 
 // ---------- Loop ----------
 void loop() {
+  DateTime now = getCurrentTime();
+ if (now.hour() == 20 && now.minute() == 52 && !hasPlayedAlarm) {
+  alarmPlayCount = 0;
+  playAlarmSound();
+  hasPlayedAlarm = true;
+}
+ else if (now.hour() == 20 && now.minute() == 53) {
+ hasPlayedAlarm = false; // Cho phép phát lại vào ngày hôm sau
+ }
+// Nếu đang phát nhạc thì tiếp tục xử lý
+if (wav && wav->isRunning()) {
+    wav->loop();
+    return; // Tạm ngưng các chế độ khác khi đang phát
+  } else if (wav) {
+  alarmPlayCount++;
+  delete wav; wav = nullptr;
+  delete file; file = nullptr;
+  delete out; out = nullptr;
+
+  if (alarmPlayCount < 2) {
+    playAlarmSound();
+  }
+}
   if (ledsActive && millis() - lastLEDUpdate >= LED_UPDATE_INTERVAL) {
     lastLEDUpdate = millis();
     updateLEDs();
@@ -166,7 +205,6 @@ void loop() {
     timeClient.update();
     rtc.adjust(DateTime((uint32_t)timeClient.getEpochTime()));
     lastNTPUpdate = millis();
-    Serial.println("⏰ Đã đồng bộ DS1307 từ NTP");
   }
 
   switch (mode) {
@@ -257,24 +295,19 @@ void loop() {
     }
   }
 }
-
 void adjustBrightness() {
-  // Lấy trung bình của nhiều lần đọc
-  int total = 0;
-  for (int i = 0; i < NUM_SAMPLES; i++) {
-    lightSensorValues[sampleIndex] = digitalRead(LIGHT_SENSOR_PIN);
-    total += lightSensorValues[sampleIndex];
-    sampleIndex = (sampleIndex + 1) % NUM_SAMPLES; // Vòng qua các phần tử trong mảng
-  }
-  int averageValue = total / NUM_SAMPLES;
-
-  // Sử dụng giá trị trung bình để điều chỉnh độ sáng
+  int lightValue = analogRead(LIGHT_SENSOR_PIN);
   int brightnessLevel;
-  if (averageValue == HIGH) {
-    brightnessLevel = 1;
-  } else {
+  if (lightValue > 3000) { 
+    brightnessLevel = 0;
+  } else if (lightValue > 2000) {
+    brightnessLevel = 5;
+  } else if (lightValue > 1000) {
+    brightnessLevel = 10;
+  } else { 
     brightnessLevel = 14;
   }
+
   ledMatrix.setIntensity(brightnessLevel);
 }
 
@@ -320,4 +353,25 @@ String getLunarDate(int d, int m, int y) {
   String result = "AL, " + String(ld) + "-" + String(lm) + "-" + String(ly);
   if (isLeap) result += "N";
   return result;
+}
+void playAlarmSound() {
+  if (wav) return;
+
+  file = new AudioFileSourceSPIFFS(wavFile);
+  if (!file->open(wavFile)) {
+    delete file; file = nullptr;
+    return;
+  }
+
+  out = new AudioOutputI2S();
+  out->SetPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
+  out->SetGain(2.0);
+  wav = new AudioGeneratorWAV();
+
+  if (!wav->begin(file, out)) {
+    delete wav; wav = nullptr;
+    delete file; file = nullptr;
+    delete out; out = nullptr;
+  } else {
+  }
 }
