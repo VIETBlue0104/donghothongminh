@@ -40,8 +40,8 @@ uint8_t gHue = 0;
 bool ledsActive = false;
 
 // ---------- WiFi ----------
-const char* ssid       = "P 302";
-const char* password   = "0327287976";
+const char* ssid       = "Son hoa 2";
+const char* password   = "chilong123";
 unsigned long lastNTPUpdate = 0;
 const unsigned long NTP_UPDATE_INTERVAL = 2UL * 60 * 60 * 1000;
 unsigned long lastWelcomeTime = 0;
@@ -168,12 +168,12 @@ void setup() {
 // ---------- Loop ----------
 void loop() {
   DateTime now = getCurrentTime();
- if (now.hour() == 20 && now.minute() == 52 && !hasPlayedAlarm) {
+ if (now.hour() == 6 && now.minute() == 30 && !hasPlayedAlarm) {
   alarmPlayCount = 0;
   playAlarmSound();
   hasPlayedAlarm = true;
 }
- else if (now.hour() == 20 && now.minute() == 53) {
+ else if (now.hour() == 6 && now.minute() == 31) {
  hasPlayedAlarm = false; // Cho phép phát lại vào ngày hôm sau
  }
 // Nếu đang phát nhạc thì tiếp tục xử lý
